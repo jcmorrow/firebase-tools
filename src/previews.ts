@@ -10,6 +10,7 @@ interface PreviewFlags {
   golang: boolean;
   deletegcfartifacts: boolean;
   dotenv: boolean;
+  crashlytics_symbols_upload: boolean;
 }
 
 export const previews: PreviewFlags = {
@@ -22,6 +23,7 @@ export const previews: PreviewFlags = {
   golang: false,
   deletegcfartifacts: false,
   dotenv: false,
+  crashlytics_symbols_upload: false,
 
   ...configstore.get("previews"),
 };

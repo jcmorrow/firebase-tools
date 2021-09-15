@@ -30,9 +30,11 @@ module.exports = function (client) {
   client.auth = {};
   client.auth.export = loadCommand("auth-export");
   client.auth.upload = loadCommand("auth-import");
-  client.crashlytics = {};
-  client.crashlytics.symbols = {};
-  client.crashlytics.symbols.upload = loadCommand("crashlytics-symbols-upload");
+  if (previews.crashlytics_symbols_upload) {
+    client.crashlytics = {};
+    client.crashlytics.symbols = {};
+    client.crashlytics.symbols.upload = loadCommand("crashlytics-symbols-upload");
+  }
   client.database = {};
   client.database.get = loadCommand("database-get");
   client.database.instances = {};
