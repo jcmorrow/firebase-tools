@@ -8,7 +8,7 @@ import { EmulatorLogger } from "./emulatorLogger";
 import { EmulatorDownloadDetails, DownloadableEmulators } from "./types";
 import { FirebaseError } from "../error";
 import * as downloadableEmulators from "./downloadableEmulators";
-import * as downloadUtils from "../downloadUtils"
+import * as downloadUtils from "../downloadUtils";
 
 tmp.setGracefulCleanup();
 
