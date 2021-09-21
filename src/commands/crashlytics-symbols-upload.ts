@@ -1,7 +1,8 @@
-import * as childProcess from "child_process";
 import { args, option } from "commander";
 import { generateKeyPairSync } from "crypto";
 import * as fs from "fs-extra";
+
+import * as spawn from "cross-spawn";
 
 import { Command } from "../command";
 import { FirebaseError } from "../error";
@@ -9,67 +10,50 @@ import * as utils from "../utils";
 
 import * as downloadUtils from "../downloadUtils"
 import { jar } from "request";
+import { util } from "chai";
 
 enum SymbolGenerator {
   breakpad = "breakpad",
   csym = "csym",
 };
 
-const buildtoolsUrl= "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
-const localCacheDir = ".crashlytics"
+interface JarOptions {
+  jarFile: string,
+  appID: string,
+  symbolGenerator: SymbolGenerator,
+  symbolFile: string,
+  generate: boolean,
+}
 
 const SYMBOL_CACHE_DIR = "symbolCache"
-//const BUILDTOOLS_JAR="../testRepo/crashlytics-buildtools/repository/com/google/firebase/firebase-crashlytics-buildtools/2.6.1/firebase-crashlytics-buildtools-2.6.1.jar"
-const UNSTRIPPED_LIBRARY="temp/libnative-lib.so"
-
-  /*()
-# `-symbolGenerator=breakpad` option for both the generate and upload
-# commands. To use the legacy generator, omit this option.
-
-## Generate the symbol file in SYMBOL_CACHE_DIR
-echo java -jar $BUILDTOOLS_JAR -generateNativeSymbols \
-  -unstrippedLibrary=$UNSTRIPPED_LIBRARY -symbolFileCacheDir=$SYMBOL_CACHE_DIR -symbolGenerator=breakpad -verbose
-
-## Upload all .cSYM files in SYMBOL_CACHE_DIR to Crashlytics servers and associate with the specified app.
-echo java -jar $BUILDTOOLS_JAR -uploadNativeSymbols \
-  -androidApplicationId=$ANDROID_APP_ID -googleAppId=$GOOGLE_APP_ID -symbolFileCacheDir=$SYMBOL_CACHE_DIR -symbolGenerator=breakpad -verbose
-}
-*/
 
 export default new Command("crashlytics:symbols:upload <symbol-files...>")
   .description("Upload symbols for native code, to symbolicate stack traces.")
   .option("--app <app_id>", "the app id of your Firebase app")
   .option("--symbol-generator [breakpad|csym]", "the symbol generator being used, defaults to breakpad.")
+  .option("--debug", "print debug output and logging from the underlying uploader tool")
   .action(async (symbolFiles: string[], options) => {
-    let appID = getGoogleAppID(options);
-    let symbolGenerator = getSymbolGenerator(options);
+    const appID = getGoogleAppID(options) || "";
+    const symbolGenerator = getSymbolGenerator(options);
+    const debug = !!options.debug;
+    for (const symbolFile of symbolFiles) {
+      const jarFile = await downloadBuiltoolsJar()
+      const jarOptions: JarOptions = {
+        jarFile, appID, symbolGenerator, symbolFile, generate: true
+      };
 
-    utils.logWarning(symbolFiles.toString());
+      utils.logBullet(`Generating symbols for ${symbolFile}`);
 
-    const jarFile = await downloadBuiltoolsJar()
-    const args = buildArgs(jarFile, symbolGenerator);
+      const generateArgs = buildArgs(jarOptions);
+      runJar(generateArgs, debug);
 
-    utils.logBullet("Generating symbols");
-    //const generatePs = childProcess.spawn("java", ["-jar", jarFile], { stdio: 'inherit' });
-    const generatePs = childProcess.spawn("java", args, { stdio: 'inherit' });
-    generatePs.stdout.on('data', data => {
-      console.log(`stdout:\n${data}`);
-    });
+      utils.logBullet(`Uploading symbols for ${symbolFile}`);
 
-    generatePs.stderr.on('data', data => {
-      console.error(`stderr: ${data}`);
-    });
+      const uploadArgs = buildArgs({...jarOptions, generate: false});
+      runJar(uploadArgs, debug);
 
-    generatePs.on('error', (error) => {
-      console.error(`error: ${error.message}`);
-    });
-
-    generatePs.on('close', (code) => {
-      console.log(`child process exited with code ${code}`);
-    });
-
-    utils.logBullet("Successfully uploaded symbols");
-
+      utils.logSuccess(`Successfully uploaded symbols for ${symbolFile}`);
+    };
   });
 
 function getGoogleAppID(options: any): string|null {
@@ -91,6 +75,11 @@ function getSymbolGenerator(options: any): SymbolGenerator {
 }
 
 async function downloadBuiltoolsJar() {
+
+  // const buildtoolsUrl= "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
+  // const localCacheDir = ".crashlytics"
+  //const BUILDTOOLS_JAR="../testRepo/crashlytics-buildtools/repository/com/google/firebase/firebase-crashlytics-buildtools/2.6.1/firebase-crashlytics-buildtools-2.6.1.jar"
+
   //const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
 
   // const dest = localCacheDir + "/buildtools.jar";
@@ -101,17 +90,41 @@ async function downloadBuiltoolsJar() {
   return "/Users/samedson/Desktop/CLI/crashlytics-buildtools-all-2.7.2.jar";
 }
 
-function buildArgs(jarFile, symbolGenerator) {
+function buildArgs(options: JarOptions): string[] {
   const baseArgs = [
     "-jar",
-    jarFile,
+    options.jarFile,
+    `-symbolGenerator=${options.symbolGenerator}`,
+    `-symbolFileCacheDir=${SYMBOL_CACHE_DIR}`,
     "-verbose",
-    `-symbolGenerator=${symbolGenerator}`,
-    `-symbolFileCacheDir=${SYMBOL_CACHE_DIR}`];
+  ];
 
-  const generateArgs = baseArgs.concat([
-    "-generateNativeSymbols",
-    "-unstrippedLibrary=" + UNSTRIPPED_LIBRARY
+  if (options.generate) {
+    return baseArgs.concat([
+      "-generateNativeSymbols",
+      `-unstrippedLibrary=${options.symbolFile}`
+    ]);
+  }
+
+  return baseArgs.concat([
+    "-uploadNativeSymbols",
+    `-googleAppId=${options.appID}`
+    // `-androidApplicationId=`,
   ]);
-  return generateArgs;
+}
+
+function runJar(args: string[], debug: boolean) {
+  // Inherit is better for debug output because it'll print as it goes. If we
+  // pipe here and print after it'll wait until the command has finished to
+  // print all the output.
+  const outputs = spawn.sync("java", args, {
+    stdio: debug ? 'inherit' : 'pipe',
+  });
+
+  if (outputs.status || 0 > 0) {
+    if (!debug) {
+      utils.logWarning(outputs.stdout?.toString() || "An unknown error occurred");
+    }
+    throw new FirebaseError("Failed to upload symbols");
+  }
 }
