@@ -1,10 +1,10 @@
-// import * as fs from "fs-extra";
+import * as fs from "fs-extra";
 import * as spawn from "cross-spawn";
 
 import { Command } from "../command";
 import { FirebaseError } from "../error";
 import * as utils from "../utils";
-// import * as downloadUtils from "../downloadUtils";
+import * as downloadUtils from "../downloadUtils";
 
 enum SymbolGenerator {
   breakpad = "breakpad",
@@ -35,12 +35,12 @@ export default new Command("crashlytics:symbols:upload <symbol-files...>")
     "the symbol generator being used, defaults to breakpad."
   )
   .option("--debug", "print debug output and logging from the underlying uploader tool")
-  .action((symbolFiles: string[], options: Options) => {
+  .action(async (symbolFiles: string[], options: Options) => {
     const app = getGoogleAppID(options) || "";
     const symbolGenerator = getSymbolGenerator(options);
     const debug = !!options.debug;
     for (const symbolFile of symbolFiles) {
-      const jarFile = downloadBuiltoolsJar();
+      const jarFile = await downloadBuiltoolsJar();
       const jarOptions: JarOptions = {
         jarFile,
         app,
@@ -81,15 +81,17 @@ function getSymbolGenerator(options: Options): SymbolGenerator {
   return options.symbolGenerator;
 }
 
-function downloadBuiltoolsJar(): Promise<string> {
-  // const buildtoolsUrl= "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
-  // const localCacheDir = ".crashlytics"
-  // const BUILDTOOLS_JAR="../testRepo/crashlytics-buildtools/repository/com/google/firebase/firebase-crashlytics-buildtools/2.6.1/firebase-crashlytics-buildtools-2.6.1.jar"
-  // const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
-  // const dest = localCacheDir + "/buildtools.jar";
-  // fs.copySync(tmpfile, dest);
-  // logger.info("Downloaded buildtools.jar to " + dest);
-  // return dest;
+async function downloadBuiltoolsJar(): Promise<string> {
+  const buildtoolsUrl =
+    "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
+  const dest = ".crashlytics/buildtools.jar";
+
+  utils.logBullet("Downloading buildtools.jar to " + dest);
+
+  const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
+
+  fs.copySync(tmpfile, dest);
+
   return "/Users/samedson/Desktop/CLI/crashlytics-buildtools-all-2.7.2.jar";
 }
 
