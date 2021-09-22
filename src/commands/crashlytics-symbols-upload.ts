@@ -1,10 +1,14 @@
 import * as fs from "fs-extra";
+import * as os from "os";
+import * as path from "path";
 import * as spawn from "cross-spawn";
+import * as uuid from "uuid";
 
 import { Command } from "../command";
 import { FirebaseError } from "../error";
 import * as utils from "../utils";
 import * as downloadUtils from "../downloadUtils";
+import { util } from "chai";
 
 enum SymbolGenerator {
   breakpad = "breakpad",
@@ -13,53 +17,72 @@ enum SymbolGenerator {
 
 interface Options {
   app: string;
-  symbolGenerator: SymbolGenerator;
-  debug: boolean;
+  generator: SymbolGenerator;
+  dryRun: boolean|null;
+  debug: boolean|null;
 }
 
 interface JarOptions {
   jarFile: string;
   app: string;
-  symbolGenerator: SymbolGenerator;
+  generator: SymbolGenerator;
+  cachePath: string;
   symbolFile: string;
   generate: boolean;
 }
 
-const SYMBOL_CACHE_DIR = "symbolCache";
+const SYMBOL_CACHE_ROOT_DIR = process.env.FIREBASE_CRASHLYTICS_CACHE_PATH || os.tmpdir();
+const JAR_CACHE_DIR =
+  process.env.FIREBASE_CRASHLYTICS_BUILDTOOLS_PATH || path.join(os.homedir(), ".cache", "firebase", "crashlytics");
 
 export default new Command("crashlytics:symbols:upload <symbol-files...>")
   .description("Upload symbols for native code, to symbolicate stack traces.")
   .option("--app <app_id>", "the app id of your Firebase app")
   .option(
-    "--symbol-generator [breakpad|csym]",
+    "--generator [breakpad|csym]",
     "the symbol generator being used, defaults to breakpad."
   )
+  .option("--dry-run", "generate symbols without uploading them")
   .option("--debug", "print debug output and logging from the underlying uploader tool")
   .action(async (symbolFiles: string[], options: Options) => {
     const app = getGoogleAppID(options) || "";
-    const symbolGenerator = getSymbolGenerator(options);
+    const generator = getSymbolGenerator(options);
+    const dryRun = !!options.dryRun;
     const debug = !!options.debug;
+    const jarFile = await downloadBuiltoolsJar();
+    const jarOptions: JarOptions = {
+      jarFile,
+      app,
+      generator,
+      cachePath: path.join(SYMBOL_CACHE_ROOT_DIR, `crashlytics-${uuid.v4()}`, "nativeSymbols", app, generator),
+      symbolFile: "",
+      generate: true,
+    };
+
     for (const symbolFile of symbolFiles) {
-      const jarFile = await downloadBuiltoolsJar();
-      const jarOptions: JarOptions = {
-        jarFile,
-        app,
-        symbolGenerator,
-        symbolFile,
-        generate: true,
-      };
-
       utils.logBullet(`Generating symbols for ${symbolFile}`);
+      const generateArgs = buildArgs({ ...jarOptions, symbolFile });
+      const output = runJar(generateArgs, debug);
+      if (output.length > 0) {
+        utils.logBullet(output);
+      } else {
+        utils.logBullet(`Generated symbols for ${symbolFile}`);
+        utils.logBullet(`Output Path: ${jarOptions.cachePath}`);
+      }
+    }
 
-      const generateArgs = buildArgs(jarOptions);
-      runJar(generateArgs, debug);
+    if (dryRun) {
+      utils.logBullet("Skipping upload because --dry-run was passed");
+      return;
+    }
 
-      utils.logBullet(`Uploading symbols for ${symbolFile}`);
-
-      const uploadArgs = buildArgs({ ...jarOptions, generate: false });
-      runJar(uploadArgs, debug);
-
-      utils.logSuccess(`Successfully uploaded symbols for ${symbolFile}`);
+    utils.logBullet(`Uploading all generated symbols`);
+    const uploadArgs = buildArgs({ ...jarOptions, generate: false });
+    const output = runJar(uploadArgs, debug);
+    if (output.length > 0) {
+      utils.logBullet(output);
+    } else {
+      utils.logBullet("Successfully uploaded all symbols");
     }
   });
 
@@ -72,25 +95,24 @@ function getGoogleAppID(options: Options): string | null {
 
 function getSymbolGenerator(options: Options): SymbolGenerator {
   // Default to using BreakPad symbols
-  if (!options.symbolGenerator) {
+  if (!options.generator) {
     return SymbolGenerator.breakpad;
   }
-  if (!Object.values(SymbolGenerator).includes(options.symbolGenerator)) {
+  if (!Object.values(SymbolGenerator).includes(options.generator)) {
     throw new FirebaseError('--symbol-generator should be set to either "breakpad" or "csym"');
   }
-  return options.symbolGenerator;
+  return options.generator;
 }
 
 async function downloadBuiltoolsJar(): Promise<string> {
-  const buildtoolsUrl =
-    "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
-  const dest = ".crashlytics/buildtools.jar";
+  // const buildtoolsUrl =
+  //   "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
 
-  utils.logBullet("Downloading buildtools.jar to " + dest);
+  // utils.logBullet("Downloading buildtools.jar to " + JAR_CACHE_DIR);
 
-  const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
+  // const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
 
-  fs.copySync(tmpfile, dest);
+  // fs.copySync(tmpfile, JAR_CACHE_DIR);
 
   return "/Users/samedson/Desktop/CLI/crashlytics-buildtools-all-2.7.2.jar";
 }
@@ -99,8 +121,8 @@ function buildArgs(options: JarOptions): string[] {
   const baseArgs = [
     "-jar",
     options.jarFile,
-    `-symbolGenerator=${options.symbolGenerator}`,
-    `-symbolFileCacheDir=${SYMBOL_CACHE_DIR}`,
+    `-symbolGenerator=${options.generator}`,
+    `-symbolFileCacheDir=${options.cachePath}`,
     "-verbose",
   ];
 
@@ -115,7 +137,7 @@ function buildArgs(options: JarOptions): string[] {
   ]);
 }
 
-function runJar(args: string[], debug: boolean): void {
+function runJar(args: string[], debug: boolean): string {
   // Inherit is better for debug output because it'll print as it goes. If we
   // pipe here and print after it'll wait until the command has finished to
   // print all the output.
@@ -129,4 +151,22 @@ function runJar(args: string[], debug: boolean): void {
     }
     throw new FirebaseError("Failed to upload symbols");
   }
+
+  // This is a bit gross, but since we don't have a great way to communicate
+  // between the buildtools.jar and the CLI, we just pull the logs out of the
+  // jar output.
+  if (!debug) {
+    var logRegex = /(Generated symbol file.*$)/m;
+    var matched  = (outputs.stdout?.toString() || "").match(logRegex);
+    if (matched) {
+      return matched[1];
+    }
+    var logRegex = /(Crashlytics symbol file uploaded successfully.*$)/m;
+    var matched  = (outputs.stdout?.toString() || "").match(logRegex);
+    if (matched) {
+      return matched[1];
+    }
+    return "";
+  }
+  return "";
 }
