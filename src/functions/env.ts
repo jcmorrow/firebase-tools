@@ -125,7 +125,7 @@ export function parse(data: string): ParseResult {
 
 export class KeyValidationError extends Error {
   constructor(public key: string, public message: string) {
-    super();
+    super(`Failed to validate key ${key}: ${message}`);
   }
 }
 
