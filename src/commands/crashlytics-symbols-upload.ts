@@ -16,10 +16,13 @@ enum SymbolGenerator {
 }
 
 interface Options {
-  app: string;
-  generator: SymbolGenerator;
+  app: string|null;
+  generator: SymbolGenerator|null;
   dryRun: boolean|null;
   debug: boolean|null;
+  // Temporary override to use a local JAR until we get the fat jar in our
+  // bucket
+  localJar: string|null;
 }
 
 interface JarOptions {
@@ -33,7 +36,9 @@ interface JarOptions {
 
 const SYMBOL_CACHE_ROOT_DIR = process.env.FIREBASE_CRASHLYTICS_CACHE_PATH || os.tmpdir();
 const JAR_CACHE_DIR =
-  process.env.FIREBASE_CRASHLYTICS_BUILDTOOLS_PATH || path.join(os.homedir(), ".cache", "firebase", "crashlytics");
+  process.env.FIREBASE_CRASHLYTICS_BUILDTOOLS_PATH || path.join(os.homedir(), ".cache", "firebase", "crashlytics", "buildtools");
+const JAR_VERSION = "2.7.1";
+const JAR_URL = `https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/${JAR_VERSION}/firebase-crashlytics-buildtools-${JAR_VERSION}.jar`;
 
 export default new Command("crashlytics:symbols:upload <symbol-files...>")
   .description("Upload symbols for native code, to symbolicate stack traces.")
@@ -44,12 +49,18 @@ export default new Command("crashlytics:symbols:upload <symbol-files...>")
   )
   .option("--dry-run", "generate symbols without uploading them")
   .option("--debug", "print debug output and logging from the underlying uploader tool")
+  .option("--local-jar <path>", "override the fetched jar with one on the filesystem")
   .action(async (symbolFiles: string[], options: Options) => {
     const app = getGoogleAppID(options) || "";
     const generator = getSymbolGenerator(options);
     const dryRun = !!options.dryRun;
     const debug = !!options.debug;
-    const jarFile = await downloadBuiltoolsJar();
+
+    let jarFile = await downloadBuiltoolsJar(debug);
+    if (options.localJar) {
+      jarFile = options.localJar;
+    }
+
     const jarOptions: JarOptions = {
       jarFile,
       app,
@@ -104,17 +115,28 @@ function getSymbolGenerator(options: Options): SymbolGenerator {
   return options.generator;
 }
 
-async function downloadBuiltoolsJar(): Promise<string> {
-  // const buildtoolsUrl =
-  //   "https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/2.7.1/firebase-crashlytics-buildtools-2.7.1.jar";
-
-  // utils.logBullet("Downloading buildtools.jar to " + JAR_CACHE_DIR);
-
-  // const tmpfile = await downloadUtils.downloadToTmp(buildtoolsUrl);
-
-  // fs.copySync(tmpfile, JAR_CACHE_DIR);
-
-  return "/Users/samedson/Desktop/CLI/crashlytics-buildtools-all-2.7.2.jar";
+async function downloadBuiltoolsJar(debug: boolean): Promise<string> {
+  const jarPath = path.join(JAR_CACHE_DIR, `crashlytics-buildtools-${JAR_VERSION}.jar`);
+  if (fs.existsSync(jarPath)) {
+    if (debug) {
+      utils.logBullet(`Buildtools Jar already downloaded at ${jarPath}`);
+    }
+    return jarPath;
+  }
+  // If the Jar cache directory exists, but the jar for the current version
+  // doesn't, then we're running the CLI with a new Jar version and we can
+  // delete the old version.
+  if (fs.existsSync(JAR_CACHE_DIR)) {
+    if (debug) {
+      utils.logBullet(`Deleting Jar cache at ${JAR_CACHE_DIR} because the CLI was run with a newer Jar version`);
+    }
+    fs.rmdirSync(JAR_CACHE_DIR);
+  }
+  utils.logBullet("Downloading buildtools.jar to " + jarPath);
+  const tmpfile = await downloadUtils.downloadToTmp(JAR_URL);
+  fs.mkdirSync(JAR_CACHE_DIR, { recursive: true });
+  fs.copySync(tmpfile, jarPath);
+  return jarPath;
 }
 
 function buildArgs(options: JarOptions): string[] {
